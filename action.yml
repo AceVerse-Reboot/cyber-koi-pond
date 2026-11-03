@@ -1,0 +1,45 @@
+name: Cyber Koi Pond
+description: Put an activity-based git-koi in an animated AI and cybersecurity themed pond.
+author: Dr Asegul Hulus (Ace)
+branding:
+  icon: droplet
+  color: blue
+inputs:
+  login:
+    description: GitHub account whose public activity generates the koi.
+    default: ${{ github.repository_owner }}
+  body:
+    description: Upstream koi body colour (white, black, asagi, tea, gold, platinum).
+    default: white
+  config:
+    description: Optional path to your JSON configuration, relative to your repository root.
+    default: ''
+  output:
+    description: GIF output path, relative to your repository root.
+    default: assets/pond.gif
+  token:
+    description: Token for reading public GitHub activity.
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - uses: yalongwastaken/git-koi@v1
+      with:
+        login: ${{ inputs.login }}
+        body: ${{ inputs.body }}
+        token: ${{ inputs.token }}
+        output-dir: .neural-koi/source
+    - name: Render the pond
+      shell: bash
+      env:
+        POND_ACTION_PATH: ${{ github.action_path }}
+        POND_CONFIG: ${{ inputs.config }}
+        POND_OUTPUT: ${{ inputs.output }}
+      run: |
+        python -m pip install -r "$POND_ACTION_PATH/requirements.txt"
+        args=(--input .neural-koi/source/koi.gif --output "$POND_OUTPUT")
+        if [[ -n "$POND_CONFIG" ]]; then args+=(--config "$POND_CONFIG"); fi
+        python "$POND_ACTION_PATH/scripts/render_pond.py" "${args[@]}"
