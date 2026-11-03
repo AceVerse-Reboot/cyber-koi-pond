@@ -1,0 +1,5 @@
+.neural-koi/
+__pycache__/
+*.pyc
+.venv/
+*.tmp.gif
