@@ -1,0 +1,37 @@
+name: My Cyber Koi Pond
+on:
+  schedule:
+    - cron: '35 0 * * *'
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/pond.yml', 'pond.json']
+permissions:
+  contents: write
+concurrency:
+  group: cyber-koi-pond
+  cancel-in-progress: false
+jobs:
+  pond:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: AceVerse-Reboot/cyber-koi-pond@main
+        with:
+          config: pond.json
+          output: assets/pond.gif
+      - name: Save the updated pond
+        shell: bash
+        run: |
+          git add assets/pond.gif
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'pond: update the activity-based koi'
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
+          done
+          echo 'Could not push after three attempts.' >&2
+          exit 1
