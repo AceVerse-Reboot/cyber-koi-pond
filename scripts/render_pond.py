@@ -26,7 +26,8 @@ DEFAULTS = {
 
 # On-screen length of the koi in pixels, whatever the source behaviour.
 FISH_LENGTH = 150
-TAIL_SWING = 25
+TAIL_SWING = 17
+TURN_BEND = 19
 
 
 def measure_koi(frame):
@@ -81,14 +82,17 @@ def align_koi(frame, measure, heading, scale, size):
                            resample=Image.Resampling.NEAREST)
 
 
-def swim_pose(sprite, tail, shoulder, phase):
+def swim_pose(sprite, tail, shoulder, phase, effort, curvature):
     """Send a lateral wave down the body while holding the head steady."""
     width, height = sprite.size
     body_length = max(1, shoulder - tail)
     shifts = []
     for x in range(width + 1):
         distance = min(1, max(0, (shoulder - x) / body_length))
-        shifts.append(TAIL_SWING * distance ** 1.6 * math.sin(phase - 5.0 * distance))
+        wave = TAIL_SWING * effort * distance ** 1.6 * math.sin(phase - 4.6 * distance)
+        lag = distance * body_length
+        bend = TURN_BEND * math.tanh(curvature * lag ** 2 / (2 * TURN_BEND))
+        shifts.append(wave + bend)
 
     mesh = []
     for x, (left, right) in enumerate(zip(shifts, shifts[1:])):
@@ -97,6 +101,22 @@ def swim_pose(sprite, tail, shoulder, phase):
                       x + 1, height - right, x + 1, -right)))
     return sprite.transform(sprite.size, Image.Transform.MESH, mesh,
                             resample=Image.Resampling.BICUBIC)
+
+
+def swim_route(phase, index):
+    """Return position, forward angle and signed curvature for one koi."""
+    cx, cy, rx, ry, offset, direction = (
+        (262, 186, 108, 65, .15, 1),
+        (539, 184, 112, 62, 2.1, -1),
+    )[index]
+    stroke = 2 * phase + index * 1.9
+    orbit = offset + direction * (phase + .23 * math.sin(stroke))
+    dx = direction * rx * math.cos(orbit)
+    dy = -direction * ry * math.sin(orbit)
+    angle = math.atan2(dy, dx)
+    curvature = -direction * rx * ry / math.hypot(dx, dy) ** 3
+    effort = .35 + .65 * (.5 + .5 * math.cos(stroke))
+    return cx + rx * math.sin(orbit), cy + ry * math.cos(orbit), angle, curvature, effort
 
 
 def load_config(path=None):
@@ -144,7 +164,7 @@ def render_pond(input_path, output_path, config=None, still_path=None):
     tail, nose = min(along), max(along)
     scale = FISH_LENGTH / max(nose - tail, 1)
     half_length = math.ceil(max(-tail, nose) * scale) + 4
-    half_width = math.ceil(max(map(abs, across)) * scale) + TAIL_SWING + 4
+    half_width = math.ceil(max(map(abs, across)) * scale) + TAIL_SWING + TURN_BEND + 4
     sprite_size = (2 * half_length, 2 * half_width)
     sprite = align_koi(source, measure, heading, scale, sprite_size)
     tail_x = round(half_length + scale * tail)
@@ -344,15 +364,13 @@ def render_pond(input_path, output_path, config=None, still_path=None):
             draw.arc((x-r*2,y-r*.5,x+r*2,y+r*.5),5,150,fill='#3d858b',width=1)
             draw.arc((x-r*2-6,y-r*.5-3,x+r*2+6,y+r*.5+3),190,310,fill='#246c77',width=1)
         for index, koi in enumerate(swimmers):
-            orbit = phase + index * math.pi
-            cut = swim_pose(koi, tail_x, shoulder, phase * beats + index * 1.8)
+            cx, cy, angle, curvature, effort = swim_route(phase, index)
+            cut = swim_pose(koi, tail_x, shoulder, phase * (beats + index) + index * 1.8,
+                            effort, curvature)
             # Pillow rotates counter-clockwise, whereas image y increases down.
-            dx = 200 * math.cos(orbit)
-            dy = -60 * math.sin(orbit)
-            angle = -math.degrees(math.atan2(dy, dx))
-            cut = cut.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True)
-            x = round(400 + 200 * math.sin(orbit) - cut.width / 2)
-            y = round(184 + 60 * math.cos(orbit) - cut.height / 2)
+            cut = cut.rotate(-math.degrees(angle), resample=Image.Resampling.BICUBIC, expand=True)
+            x = round(cx - cut.width / 2)
+            y = round(cy - cut.height / 2)
             shadow = Image.new('RGBA', cut.size)
             shadow.putalpha(cut.getchannel('A').point(lambda p: int(p * .16)))
             frame.alpha_composite(shadow, (x+5, y+10))

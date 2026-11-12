@@ -71,7 +71,8 @@ class RenderTests(unittest.TestCase):
                     self.assertTrue(hits,f'koi missing in frame {k}')
                     mx=sum(p[0] for p in hits)/len(hits);my=sum(p[1] for p in hits)/len(hits)
                     phase=2*math.pi*k/count
-                    self.assertLess(math.hypot(mx-(400+200*math.sin(phase)),my-(184+60*math.cos(phase))),12,
+                    cx,cy,*_ = pond.swim_route(phase,0)
+                    self.assertLess(math.hypot(mx-cx,my-cy),25,
                                     f'koi left the oval in frame {k}')
 
 if __name__=='__main__':unittest.main()
