@@ -26,6 +26,7 @@ DEFAULTS = {
 
 # On-screen length of the koi in pixels, whatever the source behaviour.
 FISH_LENGTH = 150
+TAIL_SWING = 25
 
 
 def measure_koi(frame):
@@ -80,16 +81,20 @@ def align_koi(frame, measure, heading, scale, size):
                            resample=Image.Resampling.NEAREST)
 
 
-def bend_tail(sprite, tail, split, phase):
-    """Move the tail progressively more toward its tip; keep the head rigid."""
+def swim_pose(sprite, tail, shoulder, phase):
+    """Send a lateral wave down the body while holding the head steady."""
     width, height = sprite.size
+    body_length = max(1, shoulder - tail)
+    shifts = []
+    for x in range(width + 1):
+        distance = min(1, max(0, (shoulder - x) / body_length))
+        shifts.append(TAIL_SWING * distance ** 1.6 * math.sin(phase - 5.0 * distance))
+
     mesh = []
-    for x in range(width):
-        distance = min(1, max(0, (split - x) / max(1, split - tail)))
-        shift = 10 * distance ** 2 * math.sin(phase - distance * 2.4)
-        mesh.append(((x, 0, x+1, height),
-                     (x, -shift, x, height-shift,
-                      x+1, height-shift, x+1, -shift)))
+    for x, (left, right) in enumerate(zip(shifts, shifts[1:])):
+        mesh.append(((x, 0, x + 1, height),
+                     (x, -left, x, height - left,
+                      x + 1, height - right, x + 1, -right)))
     return sprite.transform(sprite.size, Image.Transform.MESH, mesh,
                             resample=Image.Resampling.BICUBIC)
 
@@ -139,12 +144,13 @@ def render_pond(input_path, output_path, config=None, still_path=None):
     tail, nose = min(along), max(along)
     scale = FISH_LENGTH / max(nose - tail, 1)
     half_length = math.ceil(max(-tail, nose) * scale) + 4
-    half_width = math.ceil(max(map(abs, across)) * scale) + 14
+    half_width = math.ceil(max(map(abs, across)) * scale) + TAIL_SWING + 4
     sprite_size = (2 * half_length, 2 * half_width)
     sprite = align_koi(source, measure, heading, scale, sprite_size)
     tail_x = round(half_length + scale * tail)
     armour_start = round(half_length + scale * (tail + .53 * (nose - tail)))
     armour_end = min(sprite_size[0], round(half_length + scale * nose))
+    shoulder = round(half_length + scale * (tail + .72 * (nose - tail)))
     W, H = 800, 360
     base = Image.new('RGB', (W,H), '#101f29')
     d = ImageDraw.Draw(base)
@@ -306,6 +312,8 @@ def render_pond(input_path, output_path, config=None, still_path=None):
     # Keep the source-dependent pacing while providing enough frames for turns.
     count = max(72, round(loop_ms / 70))
     duration = max(40, round(loop_ms / count / 10) * 10)
+    # Use whole beats so the last frame flows into the first.
+    beats = max(1, round(count * duration * 1.45 / 1000))
     for i in range(count):
         phase = 2 * math.pi * i / count
         frame=base.copy().convert('RGBA')
@@ -337,7 +345,7 @@ def render_pond(input_path, output_path, config=None, still_path=None):
             draw.arc((x-r*2-6,y-r*.5-3,x+r*2+6,y+r*.5+3),190,310,fill='#246c77',width=1)
         for index, koi in enumerate(swimmers):
             orbit = phase + index * math.pi
-            cut = bend_tail(koi, tail_x, armour_start, phase * 8 + index * 1.8)
+            cut = swim_pose(koi, tail_x, shoulder, phase * beats + index * 1.8)
             # Pillow rotates counter-clockwise, whereas image y increases down.
             dx = 200 * math.cos(orbit)
             dy = -60 * math.sin(orbit)
