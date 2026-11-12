@@ -9,7 +9,7 @@ import argparse
 import json
 import math
 import random
-from PIL import Image, ImageDraw, ImageSequence, ImageFont, ImageChops
+from PIL import Image, ImageDraw, ImageSequence, ImageFont, ImageChops, ImageOps
 
 DEFAULTS = {
     "title": "CYBER KOI POND",
@@ -52,7 +52,8 @@ def measure_koi(frame):
     # The thin tail stalk reaches farther from the centroid than the blunt head,
     # so the head is the nearer end: +1 when it lies in the +axis direction.
     vote = 1 if max(projections) < -min(projections) else -1
-    return {'centre': (cx, cy), 'axis': axis, 'vote': vote, 'points': points}
+    return {'centre': (cx, cy), 'axis': axis, 'vote': vote, 'points': points,
+            'head_confidence': abs(max(projections) + min(projections))}
 
 
 def koi_headings(measures):
@@ -77,6 +78,20 @@ def align_koi(frame, measure, heading, scale, size):
     return frame.transform(size, Image.Transform.AFFINE,
                            (c, -s, cx - c * ox + s * oy, s, c, cy - s * ox - c * oy),
                            resample=Image.Resampling.NEAREST)
+
+
+def bend_tail(sprite, tail, split, phase):
+    """Move the tail progressively more toward its tip; keep the head rigid."""
+    width, height = sprite.size
+    mesh = []
+    for x in range(width):
+        distance = min(1, max(0, (split - x) / max(1, split - tail)))
+        shift = 10 * distance ** 2 * math.sin(phase - distance * 2.4)
+        mesh.append(((x, 0, x+1, height),
+                     (x, -shift, x, height-shift,
+                      x+1, height-shift, x+1, -shift)))
+    return sprite.transform(sprite.size, Image.Transform.MESH, mesh,
+                            resample=Image.Resampling.BICUBIC)
 
 
 def load_config(path=None):
@@ -110,31 +125,26 @@ def render_pond(input_path, output_path, config=None, still_path=None):
     measures = [measure_koi(f) for f in fish]
     if not any(measures):
         raise ValueError('The input GIF contains no visible fish pixels.')
-    last = next(m for m in measures if m)
-    for i, m in enumerate(measures):
-        if m is None:
-            measures[i] = last
-        else:
-            last = m
-    headings = koi_headings(measures)
-    # Measure the koi in its own head-right frame so every source frame is
-    # aligned identically, whether it laps the frame or hovers in place.
-    spans, half_length, half_width = [], 1, 1
-    for m, heading in zip(measures, headings):
-        cx, cy = m['centre']
-        cos_h, sin_h = math.cos(heading), math.sin(heading)
-        along = [(x - cx) * cos_h + (y - cy) * sin_h for x, y in m['points']]
-        across = [abs(-(x - cx) * sin_h + (y - cy) * cos_h) for x, y in m['points']]
-        spans.append((min(along), max(along)))
-        half_length = max(half_length, -min(along), max(along))
-        half_width = max(half_width, max(across))
-    tail = sorted(s[0] for s in spans)[len(spans) // 2]
-    nose = sorted(s[1] for s in spans)[len(spans) // 2]
+    visible = [(frame, measure) for frame, measure in zip(fish, measures) if measure]
+    headings = koi_headings([measure for _, measure in visible])
+    # Keep one pose's silhouette and markings. Re-estimating the head and
+    # armour on every input frame can flip the fish or move the armour seam.
+    index = max(range(len(visible)), key=lambda i: visible[i][1]['head_confidence'])
+    source, measure = visible[index]
+    heading = headings[index]
+    cx, cy = measure['centre']
+    c, s = math.cos(heading), math.sin(heading)
+    along = [(x-cx)*c + (y-cy)*s for x, y in measure['points']]
+    across = [-(x-cx)*s + (y-cy)*c for x, y in measure['points']]
+    tail, nose = min(along), max(along)
     scale = FISH_LENGTH / max(nose - tail, 1)
-    sprite_size = (2 * math.ceil(half_length * scale) + 8, 2 * math.ceil(half_width * scale) + 8)
-    # Armour starts a fixed way along the body, measured from the tail.
-    armour_start = round(sprite_size[0] / 2 + scale * (tail + .53 * (nose - tail)))
-    armour_end = min(sprite_size[0], round(sprite_size[0] / 2 + scale * nose))
+    half_length = math.ceil(max(-tail, nose) * scale) + 4
+    half_width = math.ceil(max(map(abs, across)) * scale) + 14
+    sprite_size = (2 * half_length, 2 * half_width)
+    sprite = align_koi(source, measure, heading, scale, sprite_size)
+    tail_x = round(half_length + scale * tail)
+    armour_start = round(half_length + scale * (tail + .53 * (nose - tail)))
+    armour_end = min(sprite_size[0], round(half_length + scale * nose))
     W, H = 800, 360
     base = Image.new('RGB', (W,H), '#101f29')
     d = ImageDraw.Draw(base)
@@ -152,7 +162,7 @@ def render_pond(input_path, output_path, config=None, still_path=None):
     for x in (20,780):
         for y in (95,145,195,245,295):
             d.ellipse((x-9,y-14,x+9,y+14),fill='#526764')
-    # Stones and plants belong to the scene; only the central koi represents activity.
+    # Stones and plants belong to the scene; the koi swim above them.
     for x,y,r in [(113,104,30),(157,127,21),(668,248,33),(714,226,22),(624,269,21)]:
         d.ellipse((x-r+3,y-r+7,x+r+3,y+r+7),fill='#0a4650')
         d.pieslice((x-r,y-r,x+r,y+r),20,350,fill='#3c9677',outline='#75b88c',width=2)
@@ -232,7 +242,7 @@ def render_pond(input_path, output_path, config=None, still_path=None):
         d.rounded_rectangle((x1,286,x2,308),radius=8,fill='#103c4b',outline='#397b85')
         d.text(((x1+x2)/2,297),label,fill='#a2d8d3',font=small,anchor='mm')
 
-    def cyborg(sprite, phase, split, end):
+    def cyborg(sprite, split, end, eye_color):
         # Preserve the live koi silhouette and organic tail; armour the head half.
         w,h = sprite.size
         alpha = sprite.getchannel('A')
@@ -268,8 +278,7 @@ def render_pond(input_path, output_path, config=None, still_path=None):
         eye_rows=[yy for yy in range(h) if alpha.getpixel((eye_x,yy))]
         eye_y=round(sum(eye_rows)/len(eye_rows)) if eye_rows else mid
         td.rectangle((eye_x-4,eye_y-4,eye_x+4,eye_y+3),fill='#102439')
-        glow=round(195+50*(.5+.5*math.sin(phase*2)))
-        td.rectangle((eye_x-2,eye_y-2,eye_x+2,eye_y+1),fill=(90,glow,245,255))
+        td.rectangle((eye_x-2,eye_y-2,eye_x+2,eye_y+1),fill=eye_color)
         td.point((eye_x,eye_y-1),fill='#ecffff')
         trace.putalpha(ImageChops.multiply(trace.getchannel('A'),robot_mask))
         metal.alpha_composite(trace)
@@ -283,13 +292,22 @@ def render_pond(input_path, output_path, config=None, still_path=None):
             red,green,blue=colorsys.hsv_to_rgb((hue+shift)%1,sat,val)
             data.append((round(red*255),round(green*255),round(blue*255)))
         base.putdata(data)
-    rendered=[]
-    fish = fish * 2
-    durations = durations * 2
-    measures = measures * 2
-    headings = headings * 2
-    for i,f in enumerate(fish):
-        phase=2*math.pi*i/len(fish)
+    # Build both skins once, then bend only the organic tail as they swim.
+    rgb = sprite.convert('RGB')
+    gold = ImageOps.colorize(ImageOps.grayscale(rgb), '#522732', '#ffd889')
+    companion = Image.blend(rgb, gold, .72)
+    companion.putalpha(sprite.getchannel('A'))
+    swimmers = (sprite, companion)
+    if config['robotic']:
+        swimmers = tuple(cyborg(koi, armour_start, armour_end, eye)
+                         for koi, eye in zip(swimmers, ('#5af4ed', '#ffd277')))
+    rendered = []
+    loop_ms = sum(durations) * 2
+    # Keep the source-dependent pacing while providing enough frames for turns.
+    count = max(72, round(loop_ms / 70))
+    duration = max(40, round(loop_ms / count / 10) * 10)
+    for i in range(count):
+        phase = 2 * math.pi * i / count
         frame=base.copy().convert('RGBA')
         draw=ImageDraw.Draw(frame)
         # Quiet wavelets follow the inner shore, clear of the labels and icons.
@@ -301,12 +319,12 @@ def render_pond(input_path, output_path, config=None, still_path=None):
             points=[(xx+2*math.sin((yy-start)*math.pi/40+phase+offset),yy) for yy in range(start,end+1)]
             draw.line(points,fill='#28616c',width=1)
         # Signals move through the layers, suggesting a forward pass.
-        activation = (i / len(fish) * 4) % 1
+        activation = (i / count * 4) % 1
         active_layer = min(3,int(activation*4))
         for xx,yy in layers[active_layer]:
             draw.ellipse((xx-3,yy-3,xx+3,yy+3),fill='#b8fff0',outline='#61d6d4')
         for offset,points in enumerate([[(260,176),(295,176),(310,161),(353,161)],[(447,190),(485,190),(503,172),(535,172)]]):
-            t=(i/len(fish)*3+offset*.5)%1
+            t=(i/count*3+offset*.5)%1
             section=min(2,int(t*3))
             frac=t*3-section
             a,b=points[section],points[section+1]
@@ -317,17 +335,20 @@ def render_pond(input_path, output_path, config=None, still_path=None):
             r=10+5*math.sin(phase+x)
             draw.arc((x-r*2,y-r*.5,x+r*2,y+r*.5),5,150,fill='#3d858b',width=1)
             draw.arc((x-r*2-6,y-r*.5-3,x+r*2+6,y+r*.5+3),190,310,fill='#246c77',width=1)
-        cut=align_koi(f,measures[i],headings[i],scale,sprite_size)
-        if config['robotic']:
-            cut=cyborg(cut,phase,armour_start,armour_end)
-        heading = -math.degrees(math.atan2(-60*math.sin(phase), 200*math.cos(phase)))
-        cut=cut.rotate(heading,resample=Image.Resampling.NEAREST,expand=True)
-        x=round(400+200*math.sin(phase)-cut.width/2)
-        y=round(184+60*math.cos(phase)-cut.height/2)
-        shadow=Image.new('RGBA',cut.size,(0,0,0,0))
-        shadow.putalpha(cut.getchannel('A').point(lambda p: int(p*.16)))
-        frame.alpha_composite(shadow,(x+5,y+10))
-        frame.alpha_composite(cut,(x,y))
+        for index, koi in enumerate(swimmers):
+            orbit = phase + index * math.pi
+            cut = bend_tail(koi, tail_x, armour_start, phase * 8 + index * 1.8)
+            # Pillow rotates counter-clockwise, whereas image y increases down.
+            dx = 200 * math.cos(orbit)
+            dy = -60 * math.sin(orbit)
+            angle = -math.degrees(math.atan2(dy, dx))
+            cut = cut.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True)
+            x = round(400 + 200 * math.sin(orbit) - cut.width / 2)
+            y = round(184 + 60 * math.cos(orbit) - cut.height / 2)
+            shadow = Image.new('RGBA', cut.size)
+            shadow.putalpha(cut.getchannel('A').point(lambda p: int(p * .16)))
+            frame.alpha_composite(shadow, (x+5, y+10))
+            frame.alpha_composite(cut, (x, y))
         rendered.append(frame.convert('RGB'))
     # One shared palette drawn from frames across the whole loop, so the koi keeps
     # the same colours wherever it swims instead of inheriting frame zero's.
@@ -341,7 +362,7 @@ def render_pond(input_path, output_path, config=None, still_path=None):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(output_path.name + '.tmp.gif')
     try:
-        frames[0].save(temporary, save_all=True, append_images=frames[1:], duration=durations,
+        frames[0].save(temporary, save_all=True, append_images=frames[1:], duration=duration,
                        loop=0, disposal=1, optimize=True)
         temporary.replace(output_path)
     finally:
